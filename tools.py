@@ -9,6 +9,11 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.feature_extraction.text import CountVectorizer
+import concurrent.futures
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 def find_cols(files_dictionary: dict[str,str], seperator=',',out=False) -> dict[str,list[str]]:
     """Find column names for a set of CSV/TSV files.
@@ -124,8 +129,17 @@ def chunk_unpack(Chunk,lang1=None,lang2=None,merge_on=None,merge_df=None,use_for
             mv.append(lst)
         mv_df=pd.concat(mv)
         return pd.merge(merge_df,mv_df,how=how,on=[merge_on])
+      
+def tmdb_fetch(id,session,headers):
+    url=f'https://api.themoviedb.org/3/find/{id}'
 
-def f_native(session,key,dataset_path,out_path,index_col=None,drop=True):
+    params={
+        "external_source": 'imdb_id'
+        }
+    response=session.get(url,params=params,headers=headers)
+    return id,response.json()
+
+def f_native(dataset_path,out_path,key,session,index_col=None,drop_mismatch=True,n_rows=None):
     """Filter a dataset by whether the TMDB original language matches the dataset language.
 
     Args:
@@ -148,37 +162,41 @@ def f_native(session,key,dataset_path,out_path,index_col=None,drop=True):
         'authorization':f"Bearer {key}",
         'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36'
     }
-    df=pd.read_csv(dataset_path,index_col=index_col)
+    if n_rows:
+        df=pd.read_csv(dataset_path,index_col=index_col,nrows=n_rows)
+    else:
+        df=pd.read_csv(dataset_path,index_col=index_col)
     mv_id=df['tconst'].unique()
     rows=0
-    for id in mv_id:
-        url=f'https://api.themoviedb.org/3/find/{id}'
+    indx_to_drop=[]
+    results={}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
+        fetch=[executor.submit(tmdb_fetch,id,session,headers) for id in mv_id]
 
-        params={
-            "external_source": 'imdb_id'
-        }
-        response=session.get(url,headers=headers,params=params)
-        data=response.json()
-        mv=df[df['tconst']==id]
-        if data.get('movie_results'):
-            lang=data['movie_results'][0]['original_language']
-            if data['movie_results'][0]:
-                if mv['language'].values[0]!=lang:
-                    if drop:
-                        df=df.drop(mv.index)
-                        rows+=1
-                    else:
-                        con=df['tconst']==id
-                        df.loc[con,'language']=lang
-            else:
-                df=df.drop(mv.index)
-        time.sleep(0.5)
+        for i in concurrent.futures.as_completed(fetch):
+            id,finished=i.result()
+            results[id]=finished
+
+    for i in mv_id:
+        mv=df[df['tconst']==i]
+        if results[i].get('movie_results'):
+            lang=results[i]['movie_results'][0].get('original_language')
+            if lang!=mv['language'].values[0]:
+                if drop_mismatch:
+                    indx_to_drop.extend(mv.index)
+                else:
+                    con=df['tconst']==i
+                    df.loc[con,'language']=lang
+                    rows+=len(mv)
+        else:
+            indx_to_drop.extend(mv.index)
+    df=df.drop(index=indx_to_drop)
     df=df.drop_duplicates(keep='first',subset=['tconst'])
     df.to_csv(out_path,index=False)
-    print(f"Filtered {rows} rows")
+    print(f"Filtered {rows} rows  \n Dropped {len(indx_to_drop)} rows ")
 
 
-def get_response(movie_id: int,session,key):
+def get_response(movie_id: str,session,key,is_json=False):
     """Retrieve TMDB find results for a given IMDb movie ID.
 
     Args:
@@ -203,8 +221,10 @@ def get_response(movie_id: int,session,key):
         'external_source':'imdb_id'
     }
     response=session.get(url,params=parameters,headers=header,timeout=10)
-    return response
-
+    if is_json:
+        return response.json()
+    else:
+        return response
 
 def comma_split(text):
     if type(text)!= str:
