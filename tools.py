@@ -3,17 +3,15 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import logging as lg
-import time
 import joblib
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.metrics import accuracy_score,classification_report,precision_score,confusion_matrix
+from sklearn.model_selection import train_test_split
 import concurrent.futures
 from dotenv import load_dotenv
-import os
-
-load_dotenv()
 
 def find_cols(files_dictionary: dict[str,str], seperator=',',out=False) -> dict[str,list[str]]:
     """Find column names for a set of CSV/TSV files.
@@ -236,3 +234,97 @@ def load_model(file_path):
     Parameters:
         file_path: path of the stored model"""
     return joblib.load(file_path)
+
+def train_model(file_path,model_path,out_metrics=False,save=False,save_as=None):
+    """
+    Train a machine learning classification model on movie metadata.
+
+    This function:
+    - Loads and preprocesses the dataset
+    - Converts the target language column into a binary label
+    - Splits the data into training and testing sets
+    - Loads a preconfigured model pipeline
+    - Trains the model
+    - Optionally prints evaluation metrics
+    - Optionally saves the trained model
+
+    Parameters
+    ----------
+    file_path : str
+        Path to the CSV dataset file.
+
+    model_path : str
+        Path to the serialized model/pipeline file that will be loaded
+        using `load_model()`.
+
+    out_metrics : bool, default=False
+        If True, prints:
+        - Confusion matrix
+        - Precision score
+        - Accuracy score
+        - Classification report
+
+    save : bool, default=False
+        If True, saves the trained model to:
+        `'models/mal_model.joblib'`
+
+    Returns
+    -------
+    model : sklearn Pipeline or estimator
+        The trained machine learning model.
+
+    Notes
+    -----
+    Dataset preprocessing steps:
+    - Keeps only the following columns:
+        ['originalTitle', 'genres', 'directors', 'writers', 'language']
+    - Removes rows with missing `directors`
+    - Fills remaining missing values with empty strings
+    - Converts:
+            language == 'ml' -> 1
+            all other languages -> 0
+
+    Train/Test Split
+    ----------------
+    - Test size: 20%
+    - Random state: 42
+
+    Example
+    -------
+    >>> model = train_model(
+    ...     file_path="data/movies.csv",
+    ...     model_path="models/pipeline.joblib",
+    ...     out_metrics=True,
+    ...     save=True
+    ... )
+
+    Output Example
+    --------------
+    Confusion Matrix:
+    [[120  10]
+     [  5  65]]
+
+    Precision: 0.87
+    Accuracy: 0.92
+
+    Classification Report:
+                  precision    recall    f1-score   support
+    """
+    df=pd.read_csv(file_path,usecols=['originalTitle', 'genres', 'directors', 'writers',
+       'language'],na_values=r'\N')
+    df=df.dropna(subset=['directors'])
+    df=df.fillna('')
+    df['language']=(df['language']=='ml').astype('Int64')
+    y=df.pop('language')
+    X=df
+    x_train,x_test,y_train,y_test=train_test_split(X,y,test_size=0.2,random_state=42)
+    model=load_model(model_path)
+    model.fit(x_train,y_train)
+    predict=model.predict(x_test)
+    if out_metrics:
+        print(f"Confusion_matrix: {confusion_matrix(y_test,predict)}\nPrecision: {precision_score(y_test,predict)}\nAccuracy: {accuracy_score(y_test,predict)}")
+        print(f" \nClassification report: {classification_report(y_test,predict)}")
+    if save and save_as:
+        joblib.dump(model,save_as)
+        print(f'Saved as: {save_as}')
+    return model
