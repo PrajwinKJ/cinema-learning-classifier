@@ -1,0 +1,218 @@
+import pandas as pd
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import logging as lg
+import time
+import joblib
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.feature_extraction.text import CountVectorizer
+
+def find_cols(files_dictionary: dict[str,str], seperator=',',out=False) -> dict[str,list[str]]:
+    """Find column names for a set of CSV/TSV files.
+
+    Args:
+        files_dictionary: Mapping of friendly names to file paths.
+        seperator: Field separator used when reading files (e.g. '\t' for TSV, ',' for CSV).
+        out: If True, print the discovered columns for each file.
+
+    Returns:
+        Dictionary where each key is the friendly name and each value is the list of column names.
+
+    Example:
+        files = {'Basics': 'data/title.basics.tsv'}
+        cols = find_cols(files, seperator='\t', out=True)
+    """
+    try:
+        cols={}
+        for name,loc in files_dictionary.items():
+            df=pd.read_csv(loc,nrows=5,sep=seperator)
+            cols[name]=df.columns.to_list()
+        
+        if out:
+            for i,j in cols.items():
+                print(f"{i}: {j}")
+        return cols;
+    except pd.errors.ParserError as e:
+        lg.error("Invalid seperator type")
+        lg.warning("Please Mention the seperator type")
+        
+def col_origin(cols_dictionary: dict, file_path: str, seperator=','):
+    """Match columns from a source file to a set of candidate files.
+
+    Args:
+        cols_dictionary: Mapping of file names to column name lists.
+        file_path: Path of the file whose columns should be matched.
+        seperator: Separator used to read the source file.
+
+    Returns:
+        None. Prints which candidate file contains each matching column.
+
+    Example:
+        cols = {'AKAs': ['tconst', 'title', 'language']}
+        col_origin(cols, 'Original malayalam movies.csv')
+    """
+    try:
+        df=pd.read_csv(file_path,nrows=5,sep=seperator)
+        cols=df.columns.to_list()
+        for key,columns in cols_dictionary.items():
+            lst=[]
+            for i in columns:
+                if i in cols:
+                    lst.append(i)
+                    #cols.remove(i)
+            if lst:
+                print(f"Og_file: {key}      columns: {lst}")
+    except pd.errors.ParserError as e:
+        lg.error("Invalid seperator type")
+        lg.warning("P please Mention the seperator type")
+
+def create_session():
+    """Create a requests session with retry handling for transient errors.
+
+    Returns:
+        A configured requests.Session instance.
+
+    Example:
+        session = create_session()
+        response = session.get('https://api.themoviedb.org/3/')
+    """
+    session=requests.session()
+    retry=Retry(total= 5,backoff_factor=2,status_forcelist=[429, 500, 502, 503, 504],connect=5,read=2)  #count is for retrying for the connection error & read for data transfer error
+    adapter=HTTPAdapter(max_retries=retry)
+    session.mount('https://',adapter)
+    return session
+
+def chunk_unpack(Chunk,lang1=None,lang2=None,merge_on=None,merge_df=None,use_for="unpack",how='inner'):
+    """Process chunked DataFrames either by filtering languages or by merging.
+
+    Args:
+        Chunk: Iterable of DataFrame chunks returned by pandas.read_csv(..., chunksize=...).
+        lang1: Primary language filter value for the 'language' column.
+        lang2: Secondary language filter value for the 'language' column.
+        merge_on: Column name used to join when use_for='merge'.
+        merge_df: DataFrame to merge with filtered chunk rows when use_for='merge'.
+        use_for: Either 'unpack' to filter language rows or 'merge' to join with merge_df.
+        how: Merge strategy used when use_for='merge' (default 'inner').
+
+    Returns:
+        A DataFrame containing either the filtered rows or the merged result.
+
+    Examples:
+        chunks = pd.read_csv('title.akas.tsv', sep='\t', chunksize=50000)
+        malayalam = chunk_unpack(chunks, lang1='ml')
+
+        merged = chunk_unpack(chunks, use_for='merge', merge_on='tconst', merge_df=existing_df)
+    """
+    mv=[]
+    if use_for.lower()=="unpack":
+        if lang1 & lang2:
+            for i in Chunk:
+                lst=i[(i['language']==lang1)|(i['language']==lang2)]
+                mv.append(lst)
+        elif lang1:
+            for i in Chunk:
+                lst=i[(i['language']==lang1)]
+                mv.append(lst)
+        return pd.concat(mv)
+    elif use_for.lower()=='merge':
+        merge_lst=merge_df[merge_on].unique()
+        for i in Chunk:
+            lst=i[i[merge_on].isin(merge_lst)]
+            mv.append(lst)
+        mv_df=pd.concat(mv)
+        return pd.merge(merge_df,mv_df,how=how,on=[merge_on])
+
+def f_native(session,key,dataset_path,out_path,index_col=None,drop=True):
+    """Filter a dataset by whether the TMDB original language matches the dataset language.
+
+    Args:
+        session: A requests.Session configured with retry handling.
+        key: TMDB Bearer token string.
+        dataset_path: Path to a CSV file containing a 'tconst' and 'language' column.
+        out_path: Path location to save the filtered file.
+        index_col: Optional pandas index column for reading the dataset.
+        drop: drop the the non native movies from the dataset (Default value: True).
+
+    Returns:
+        None. Saves a filtered file named 'Class 0 native.csv'.
+
+    Example:
+        session = create_session()
+        f_native(session, api_key, 'Class 0.csv')
+    """
+    headers={
+        'accept':'application/json',
+        'authorization':f"Bearer {key}",
+        'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36'
+    }
+    df=pd.read_csv(dataset_path,index_col=index_col)
+    mv_id=df['tconst'].unique()
+    rows=0
+    for id in mv_id:
+        url=f'https://api.themoviedb.org/3/find/{id}'
+
+        params={
+            "external_source": 'imdb_id'
+        }
+        response=session.get(url,headers=headers,params=params)
+        data=response.json()
+        mv=df[df['tconst']==id]
+        if data.get('movie_results'):
+            lang=data['movie_results'][0]['original_language']
+            if data['movie_results'][0]:
+                if mv['language'].values[0]!=lang:
+                    if drop:
+                        df=df.drop(mv.index)
+                        rows+=1
+                    else:
+                        con=df['tconst']==id
+                        df.loc[con,'language']=lang
+            else:
+                df=df.drop(mv.index)
+        time.sleep(0.5)
+    df=df.drop_duplicates(keep='first',subset=['tconst'])
+    df.to_csv(out_path,index=False)
+    print(f"Filtered {rows} rows")
+
+
+def get_response(movie_id: int,session,key):
+    """Retrieve TMDB find results for a given IMDb movie ID.
+
+    Args:
+        movie_id: IMDb title ID such as 'tt1234567'.
+        session: requests.Session object for HTTP requests.
+        key: TMDB Bearer token string.
+
+    Returns:
+        requests.Response object from the TMDB API.
+
+    Example:
+        response = get_response('tt0075860', session, api_key)
+        data = response.json()
+    """
+    url=f'https://api.themoviedb.org/3/find/{movie_id}'
+    header={
+        'accept':'application/json',
+        'Authorization':f'bearer {key}',
+        'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36'
+    }
+    parameters={
+        'external_source':'imdb_id'
+    }
+    response=session.get(url,params=parameters,headers=header,timeout=10)
+    return response
+
+
+def comma_split(text):
+    if type(text)!= str:
+        return []
+    return text.split(',')
+
+def load_model(file_path):
+    """Load the saved model from the given path
+    Parameters:
+        file_path: path of the stored model"""
+    return joblib.load(file_path)
