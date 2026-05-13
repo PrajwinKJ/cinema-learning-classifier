@@ -7,3 +7,5 @@ other dataset/
 data for predict/
 *.ipynb
 predicted_mal_1M.csv
+*.json
+training data/

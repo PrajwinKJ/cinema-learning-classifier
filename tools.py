@@ -37,12 +37,13 @@ def find_cols(files_dictionary: dict[str,str], seperator=',',out=False) -> dict[
         if out:
             for i,j in cols.items():
                 print(f"{i}: {j}")
-        return cols;
+        else:
+            return cols;
     except pd.errors.ParserError as e:
         lg.error("Invalid seperator type")
         lg.warning("Please Mention the seperator type")
         
-def col_origin(cols_dictionary: dict, file_path: str, seperator=','):
+def col_origin(cols_dictionary: dict, file_path: str, seperator=',',out=False,no_rm_col=None,index_col=None):
     """Match columns from a source file to a set of candidate files.
 
     Args:
@@ -60,14 +61,21 @@ def col_origin(cols_dictionary: dict, file_path: str, seperator=','):
     try:
         df=pd.read_csv(file_path,nrows=5,sep=seperator)
         cols=df.columns.to_list()
+        dict={}
+        print(cols)
         for key,columns in cols_dictionary.items():
             lst=[]
             for i in columns:
+                
                 if i in cols:
                     lst.append(i)
-                    #cols.remove(i)
-            if lst:
-                print(f"Og_file: {key}      columns: {lst}")
+                    if no_rm_col and i not in no_rm_col:
+                        cols.remove(i) 
+            useful=[c for c in lst if c!=index_col]
+            if len(useful)>0:
+                dict[key]=lst
+        if not out:
+            return dict
     except pd.errors.ParserError as e:
         lg.error("Invalid seperator type")
         lg.warning("P please Mention the seperator type")
@@ -319,7 +327,8 @@ def train_model(file_path,model_path,out_metrics=False,save=False,save_as=None):
     X=df
     x_train,x_test,y_train,y_test=train_test_split(X,y,test_size=0.2,random_state=42)
     model=load_model(model_path)
-    model.fit(x_train,y_train)
+    model.fit(x_train,y_train
+              )
     predict=model.predict(x_test)
     if out_metrics:
         print(f"Confusion_matrix: {confusion_matrix(y_test,predict)}\nPrecision: {precision_score(y_test,predict)}\nAccuracy: {accuracy_score(y_test,predict)}")
@@ -328,3 +337,33 @@ def train_model(file_path,model_path,out_metrics=False,save=False,save_as=None):
         joblib.dump(model,save_as)
         print(f'Saved as: {save_as}')
     return model
+
+def mergeon_cols(orgcols_dict,file_dict,sep=',',n_rows=None,save_as='df',out_path=None):
+    paths=[]
+    cols=[]
+    dfs=[]
+    for key,values in file_dict.items():
+        if key in orgcols_dict:
+            paths.append(values)
+            cols.append(orgcols_dict[key])
+    if n_rows:
+        for i in range(0,len(paths)):
+            df=pd.read_csv(paths[i],nrows=n_rows,usecols=cols[i],sep=sep)
+            dfs.append(df)
+    else:
+        for i in range(0,len(paths)):
+            df=pd.read_csv(paths[i],usecols=cols[i],sep=sep)
+            dfs.append(df)
+    df=dfs[0]
+    for i in range(1,len(dfs)):
+        df=pd.merge(df,dfs[i],how='inner',on='tconst',)
+    if save_as=='df':
+        return df
+    elif save_as=='csv':
+        if out_path:
+            df.to_csv(out_path,index=False)
+            print(f"Merged File saved As: {out_path}")
+        else:
+            df.to_csv('ColumnsMerged.csv',index=False)
+            print('Merged File Saved As: "ColumnsMerged.Csv')
+    
