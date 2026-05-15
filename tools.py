@@ -43,7 +43,7 @@ def find_cols(files_dictionary: dict[str,str], seperator=',',out=False) -> dict[
         lg.error("Invalid seperator type")
         lg.warning("Please Mention the seperator type")
         
-def col_origin(cols_dictionary: dict, file_path: str, seperator=',',out=False,no_rm_col=None,index_col=None):
+def col_origin(cols_dictionary: dict, file_path: str, seperator=',',out=False,target_col=None,index_col=None):
     """Match columns from a source file to a set of candidate files.
 
     Args:
@@ -61,16 +61,15 @@ def col_origin(cols_dictionary: dict, file_path: str, seperator=',',out=False,no
     try:
         df=pd.read_csv(file_path,nrows=5,sep=seperator)
         cols=df.columns.to_list()
+        if target_col:
+            cols.remove(target_col)
         dict={}
         print(cols)
         for key,columns in cols_dictionary.items():
             lst=[]
             for i in columns:
-                
                 if i in cols:
-                    lst.append(i)
-                    if no_rm_col and i not in no_rm_col:
-                        cols.remove(i) 
+                    lst.append(i) 
             useful=[c for c in lst if c!=index_col]
             if len(useful)>0:
                 dict[key]=lst
@@ -199,7 +198,7 @@ def f_native(dataset_path,out_path,key,session,index_col=None,drop_mismatch=True
     df=df.drop(index=indx_to_drop)
     df=df.drop_duplicates(keep='first',subset=['tconst'])
     df.to_csv(out_path,index=False)
-    print(f"Filtered {rows} rows  \n Dropped {len(indx_to_drop)} rows ")
+    print(f"Filtered {rows} rows  \n Dropped {len(indx_to_drop)} rows \n total_native_movies_found: {len(df)}")
 
 
 def get_response(movie_id: str,session,key,is_json=False):
@@ -243,7 +242,7 @@ def load_model(file_path):
         file_path: path of the stored model"""
     return joblib.load(file_path)
 
-def train_model(file_path,model_path,out_metrics=False,save=False,save_as=None):
+def train_model(file_path,model_path,out_metrics=False,save=False,save_path=None):
     """
     Train a machine learning classification model on movie metadata.
 
@@ -333,9 +332,9 @@ def train_model(file_path,model_path,out_metrics=False,save=False,save_as=None):
     if out_metrics:
         print(f"Confusion_matrix: {confusion_matrix(y_test,predict)}\nPrecision: {precision_score(y_test,predict)}\nAccuracy: {accuracy_score(y_test,predict)}")
         print(f" \nClassification report: {classification_report(y_test,predict)}")
-    if save and save_as:
-        joblib.dump(model,save_as)
-        print(f'Saved as: {save_as}')
+    if save and save_path:
+        joblib.dump(model,save_path)
+        print(f'Saved as: {save_path}')
     return model
 
 def mergeon_cols(orgcols_dict,file_dict,sep=',',n_rows=None,save_as='df',out_path=None):
