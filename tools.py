@@ -59,12 +59,11 @@ def col_origin(cols_dictionary: dict, file_path: str, seperator=',',out=False,ta
         col_origin(cols, 'Original malayalam movies.csv')
     """
     try:
-        df=pd.read_csv(file_path,nrows=5,sep=seperator)
+        df=pd.read_csv(file_path,nrows=1,sep=seperator)
         cols=df.columns.to_list()
         if target_col:
             cols.remove(target_col)
         dict={}
-        print(cols)
         for key,columns in cols_dictionary.items():
             lst=[]
             for i in columns:
@@ -75,6 +74,9 @@ def col_origin(cols_dictionary: dict, file_path: str, seperator=',',out=False,ta
                 dict[key]=lst
         if not out:
             return dict
+        if out:
+            for key,columns in dict.items():
+                print(f"{key} : {columns}")
     except pd.errors.ParserError as e:
         lg.error("Invalid seperator type")
         lg.warning("P please Mention the seperator type")
@@ -231,18 +233,19 @@ def get_response(movie_id: str,session,key,is_json=False):
     else:
         return response
 
-def comma_split(text):
-    if type(text)!= str:
-        return []
-    return text.split(',')
-
 def load_model(file_path):
     """Load the saved model from the given path
     Parameters:
         file_path: path of the stored model"""
     return joblib.load(file_path)
 
-def train_model(file_path,model_path,out_metrics=False,save=False,save_path=None):
+def comma_split(text):
+    if type(text)!=str:
+        return []
+    else:
+        return text.split(',')
+
+def train_model(training_path,model_path,out_metrics=False,save=False,save_path=None):
     """
     Train a machine learning classification model on movie metadata.
 
@@ -257,7 +260,7 @@ def train_model(file_path,model_path,out_metrics=False,save=False,save_path=None
 
     Parameters
     ----------
-    file_path : str
+    training_path : str
         Path to the CSV dataset file.
 
     model_path : str
@@ -317,17 +320,18 @@ def train_model(file_path,model_path,out_metrics=False,save=False,save_path=None
     Classification Report:
                   precision    recall    f1-score   support
     """
-    df=pd.read_csv(file_path,usecols=['originalTitle', 'genres', 'directors', 'writers',
-       'language'],na_values=r'\N')
-    df=df.dropna(subset=['directors'])
+    df=pd.read_csv(training_path,na_values=r'\N')
+    null_cols=df.isnull().sum()
+    null_drop=null_cols[(null_cols<=50)&(null_cols>0)].index
+    df=df.drop('tconst',axis=1)
+    df=df.dropna(subset=null_drop)    
     df=df.fillna('')
     df['language']=(df['language']=='ml').astype('Int64')
     y=df.pop('language')
     X=df
     x_train,x_test,y_train,y_test=train_test_split(X,y,test_size=0.2,random_state=42)
     model=load_model(model_path)
-    model.fit(x_train,y_train
-              )
+    model.fit(x_train,y_train)
     predict=model.predict(x_test)
     if out_metrics:
         print(f"Confusion_matrix: {confusion_matrix(y_test,predict)}\nPrecision: {precision_score(y_test,predict)}\nAccuracy: {accuracy_score(y_test,predict)}")
@@ -337,32 +341,83 @@ def train_model(file_path,model_path,out_metrics=False,save=False,save_path=None
         print(f'Saved as: {save_path}')
     return model
 
-def mergeon_cols(orgcols_dict,file_dict,sep=',',n_rows=None,save_as='df',out_path=None):
+def mergeon_cols(origin_cols_dict,n_rows,file_dict,sep='\t',skip_rows=0,save_as='df',out_path=None,group=False,group_file_name='title.principals(crews)',use_crew_cols=['tconst','crews','category'],category_group=['actor','actress','cinematographer','composer'],group_sep='\t'):
+    """
+    Dynamically loads, filters, and merges multiple large CSV/TSV datasets.
+    Includes a built-in memory safety valve and chunking engine for massive files.
+
+    Args:
+        origin_cols_dict (dict): Maps file keys to the specific columns to load.
+        n_rows (int): The absolute maximum number of rows to read per file.
+        file_dict (dict): Dictionary of file keys and their file paths.
+        sep (str): Delimiter for standard files (default is '\\t').
+        skip_rows (int): Number of rows to fast-forward (Warning: Must handle headers!).
+        save_as (str): Output format. 'df' returns Pandas DataFrame, 'csv' saves to disk.
+        out_path (str): File path for saving the CSV if save_as='csv'.
+        group (bool): Flag to trigger specialized processing for a specific file.
+        group_file_name (str): The key name of the massive file that requires chunking (e.g., 'title.principals').
+        group_sep (str): Delimiter specifically for the chunked file.
+        category_group (list): List of strings to filter the chunked file (e.g., ['actor', 'director']).
+        use_crew_cols (list): Explicit columns to load from the chunked file (e.g., ['tconst', 'nconst', 'category']).
+
+    Returns:
+        pd.DataFrame or None: Returns the merged DataFrame if save_as='df', otherwise saves to disk and returns None.
+        
+    Notes:
+        - Includes a safety check: (n_rows - skip_rows <= 500000) to prevent RAM meltdowns.
+        - The 'group' file is processed using a chunksize of 50,000 to safely extract 
+          and collapse string IDs (like nconst) without overflowing memory.
+    """
     paths=[]
     cols=[]
     dfs=[]
-    for key,values in file_dict.items():
-        if key in orgcols_dict:
-            paths.append(values)
-            cols.append(orgcols_dict[key])
-    if n_rows:
-        for i in range(0,len(paths)):
-            df=pd.read_csv(paths[i],nrows=n_rows,usecols=cols[i],sep=sep)
-            dfs.append(df)
+    crews=None
+    if n_rows-skip_rows<=500000:
+        for key,values in file_dict.items():
+            if key in origin_cols_dict:
+                if group & key ==group_file_name:
+                    crews=values
+                else:
+                    paths.append(values)
+                cols.append(origin_cols_dict[key])
+            for i in range(0,len(paths)):
+                df=pd.read_csv(paths[i],nrows=n_rows,usecols=cols[i],sep=sep,skiprows=range(1,skip_rows+1))
+                dfs.append(df)
+        #else:
+            #for i in range(0,len(paths)):
+                #df=pd.read_csv(paths[i],usecols=cols[i],sep=sep)
+                #dfs.append(df)
+        if crews:
+            df=dfs[0]
+            tconst=df['tconst'].to_list()
+            lst=[]
+            if use_crew_cols:
+                if group_sep:
+                    chunk=pd.read_csv(crews,usecols=use_crew_cols,sep=group_sep,chunksize=50000)
+                else:
+                    chunk=pd.read_csv(crews,usecols=use_crew_cols,sep=sep,chunksize=50000)
+                mvs=[]
+                for i in chunk:
+                    filtered=i[(i['tconst'].isin(tconst))&(i['category'].isin(category_group))]
+                    if not filtered.empty:
+                        grouped_lst=filtered.groupby('tconst')['crews'].apply(lambda x: ','.join(x)).reset_index()
+                        mvs.append(grouped_lst)
+                if mvs:
+                    crew_df=pd.concat(mvs)
+                    crew_df=crew_df.groupby('tconst')['crews'].apply(lambda x: ','.join(x)).reset_index()
+                    dfs.append(crew_df)
+        df=dfs[0]
+        for i in range(1,len(dfs)):
+            df=pd.merge(df,dfs[i],how='inner',on='tconst',)
+        if save_as=='df':
+            return df
+        elif save_as=='csv':
+            if out_path:
+                df.to_csv(out_path,index=False)
+                print(f"Merged File saved As: {out_path}")
+            else:
+                df.to_csv('ColumnsMerged.csv',index=False)
+                print('Merged File Saved As: "ColumnsMerged.Csv')
     else:
-        for i in range(0,len(paths)):
-            df=pd.read_csv(paths[i],usecols=cols[i],sep=sep)
-            dfs.append(df)
-    df=dfs[0]
-    for i in range(1,len(dfs)):
-        df=pd.merge(df,dfs[i],how='inner',on='tconst',)
-    if save_as=='df':
-        return df
-    elif save_as=='csv':
-        if out_path:
-            df.to_csv(out_path,index=False)
-            print(f"Merged File saved As: {out_path}")
-        else:
-            df.to_csv('ColumnsMerged.csv',index=False)
-            print('Merged File Saved As: "ColumnsMerged.Csv')
-    
+        lg.warning("Please keep the range of rows in between 500000")
+        lg.info('Toggle "n_rows/skip_rows" to keep rows range in between 500000')    

@@ -6,21 +6,25 @@ from sklearn.pipeline import Pipeline
 from sklearn.metrics import classification_report,confusion_matrix
 import pandas as pd
 import joblib
+import tools
 
-df=pd.read_csv('training data/training2.csv')
+df=pd.read_csv('training data/training_3.csv')
 df['language']=(df['language']=='ml').astype('Int64')
 df=df.drop('tconst',axis=1)
-df=df.dropna(subset=['directors'])
+null=df.isnull().sum()
+null_drop=null[(null<=50)&(null>0)].index
+df=df.dropna(subset=null_drop)
 df=df.fillna('')
 y=df.pop('language')
 X=df
 x_train,x_test,y_train,y_test=train_test_split(X,y,test_size=0.2,random_state=42)
 
 ct=ColumnTransformer([('title_vect',CountVectorizer(ngram_range=(1,3)),'originalTitle'),
-                      ('genre_vect',CountVectorizer(),'genres'),
+                      ('genre_vect',CountVectorizer(tokenizer=tools.comma_split),'genres'),
                       ('directors_vect',CountVectorizer(),'directors'),
-                      ('writers_vect',CountVectorizer(),'writers')
-                      ], remainder='passthrough')
+                      ('writers_vect',CountVectorizer(),'writers'),
+                      ('crews_vect',CountVectorizer(),'crews')
+                      ], remainder='drop')
 
 pipeline=Pipeline([
     ('Vectorizer',ct),
@@ -39,5 +43,5 @@ search=RandomizedSearchCV(pipeline,param_distributions=params,n_iter=10,cv=10,sc
 search.fit(x_train,y_train)
 model=search.best_estimator_
 
-joblib.dump(model,'models/mal_model v2.joblib')
+joblib.dump(model,'models/mal_model_v3.joblib')
 print("Model Saved Successfuly!!")
