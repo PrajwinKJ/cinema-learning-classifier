@@ -12,6 +12,7 @@ from sklearn.metrics import accuracy_score,classification_report,precision_score
 from sklearn.model_selection import train_test_split
 import concurrent.futures
 from dotenv import load_dotenv
+import gc
 
 def find_cols(files_dictionary: dict[str,str], seperator=',',out=False) -> dict[str,list[str]]:
     """Find column names for a set of CSV/TSV files.
@@ -146,7 +147,7 @@ def tmdb_fetch(id,session,headers):
     response=session.get(url,params=params,headers=headers)
     return id,response.json()
 
-def f_native(dataset_path,out_path,key,session,index_col=None,drop_mismatch=True,n_rows=None):
+def f_native(dataset_path,out_path,key,session,index_col=None,drop_mismatch=True,n_rows=None,save_as='csv',drop_not_found=False):
     """Filter a dataset by whether the TMDB original language matches the dataset language.
 
     Args:
@@ -177,6 +178,8 @@ def f_native(dataset_path,out_path,key,session,index_col=None,drop_mismatch=True
     rows=0
     indx_to_drop=[]
     results={}
+    native=0
+    missing=0
     with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
         fetch=[executor.submit(tmdb_fetch,id,session,headers) for id in mv_id]
 
@@ -187,6 +190,7 @@ def f_native(dataset_path,out_path,key,session,index_col=None,drop_mismatch=True
     for i in mv_id:
         mv=df[df['tconst']==i]
         if results[i].get('movie_results'):
+            native+=1
             lang=results[i]['movie_results'][0].get('original_language')
             if lang!=mv['language'].values[0]:
                 if drop_mismatch:
@@ -196,11 +200,20 @@ def f_native(dataset_path,out_path,key,session,index_col=None,drop_mismatch=True
                     df.loc[con,'language']=lang
                     rows+=len(mv)
         else:
+            df.loc[df['tconst']==i,'language']=r'\N'
+            missing+=1
+        if drop_not_found:
             indx_to_drop.extend(mv.index)
     df=df.drop(index=indx_to_drop)
     df=df.drop_duplicates(keep='first',subset=['tconst'])
-    df.to_csv(out_path,index=False)
-    print(f"Filtered {rows} rows  \n Dropped {len(indx_to_drop)} rows \n total_native_movies_found: {len(df)}")
+    if save_as=='csv':
+        df.to_csv(out_path,index=False)
+    elif save_as=='df':
+        return df
+    else:
+        lg.error('Invalid Save As type')
+        return lg.info('Use either "csv"/"df"')
+    print(f"Filtered {rows} rows  \n Dropped {len(indx_to_drop)} rows \n Total_native_movies_found: {native} \nTotal_missing_movies_in_api: {missing}")
 
 
 def get_response(movie_id: str,session,key,is_json=False):
@@ -232,12 +245,40 @@ def get_response(movie_id: str,session,key,is_json=False):
         return response.json()
     else:
         return response
+    
+def clean_features(file_path,index_col=None,drop_na=False,drop_index=True):
+    """
+    Loads a dataset and performs final sanitization before model prediction.
 
-def load_model(file_path):
-    """Load the saved model from the given path
-    Parameters:
-        file_path: path of the stored model"""
-    return joblib.load(file_path)
+    This function handles specific database artifacts (like '\\N'), performs a 
+    surgical drop on columns with minimal missing data, and safely imputes the rest.
+    
+    The Logic:
+    1. Reads the CSV and converts literal '\\N' strings into true nulls.
+    2. Identifies columns that are mostly complete (between 1 and 50 nulls).
+    3. Drops only the rows missing data in those specific, high-quality columns.
+    4. Drops the ID/Index column (like 'tconst') if specified, to prevent data leakage.
+    5. Fills all remaining nulls across the DataFrame with empty strings ('') 
+       so the text tokenizer can process them without crashing.
+
+    Args:
+        file_path (str): The local path to the merged CSV dataset.
+        index_col (str, optional): The name of an ID column to drop from the 
+            features (e.g., 'tconst'). Defaults to False.
+
+    Returns:
+        pd.DataFrame: A fully cleaned, imputed, and model-ready DataFrame.
+    """
+    df=pd.read_csv(file_path,na_values=r'\N')
+    null_cols=df.isnull().sum()
+    null_drop=null_cols[(null_cols<=50)&(null_cols>0)].index
+    if index_col and drop_index:
+        df=df.drop(index_col,axis=1)
+    if drop_na:
+        df=df.dropna(subset=null_drop)    
+    df=df.fillna('')
+    return df
+
 
 def comma_split(text):
     if type(text)!=str:
@@ -245,7 +286,7 @@ def comma_split(text):
     else:
         return text.split(',')
 
-def train_model(training_path,model_path,out_metrics=False,save=False,save_path=None):
+def train_model(training_file_path,model_path,out_metrics=False,save=False,save_path=None):
     """
     Train a machine learning classification model on movie metadata.
 
@@ -320,17 +361,12 @@ def train_model(training_path,model_path,out_metrics=False,save=False,save_path=
     Classification Report:
                   precision    recall    f1-score   support
     """
-    df=pd.read_csv(training_path,na_values=r'\N')
-    null_cols=df.isnull().sum()
-    null_drop=null_cols[(null_cols<=50)&(null_cols>0)].index
-    df=df.drop('tconst',axis=1)
-    df=df.dropna(subset=null_drop)    
-    df=df.fillna('')
+    df=clean_features(training_file_path,index_col='tconst')
     df['language']=(df['language']=='ml').astype('Int64')
     y=df.pop('language')
     X=df
     x_train,x_test,y_train,y_test=train_test_split(X,y,test_size=0.2,random_state=42)
-    model=load_model(model_path)
+    model=joblib.load(model_path)
     model.fit(x_train,y_train)
     predict=model.predict(x_test)
     if out_metrics:
@@ -341,7 +377,7 @@ def train_model(training_path,model_path,out_metrics=False,save=False,save_path=
         print(f'Saved as: {save_path}')
     return model
 
-def mergeon_cols(origin_cols_dict,n_rows,file_dict,sep='\t',skip_rows=0,save_as='df',out_path=None,group=False,group_file_name='title.principals(crews)',use_crew_cols=['tconst','crews','category'],category_group=['actor','actress','cinematographer','composer'],group_sep='\t'):
+def mergeon_cols(origin_cols_dict,file_dict,n_rows=1000000,sep=None,skip_rows=0,save_as='df',out_path=None,group=False,group_file_name='title.principals(crew)',use_crew_cols=['tconst','crews','category'],category_group=['actor','actress','cinematographer','composer'],group_sep='\t'):
     """
     Dynamically loads, filters, and merges multiple large CSV/TSV datasets.
     Includes a built-in memory safety valve and chunking engine for massive files.
@@ -358,7 +394,7 @@ def mergeon_cols(origin_cols_dict,n_rows,file_dict,sep='\t',skip_rows=0,save_as=
         group_file_name (str): The key name of the massive file that requires chunking (e.g., 'title.principals').
         group_sep (str): Delimiter specifically for the chunked file.
         category_group (list): List of strings to filter the chunked file (e.g., ['actor', 'director']).
-        use_crew_cols (list): Explicit columns to load from the chunked file (e.g., ['tconst', 'nconst', 'category']).
+        use_crew_cols (list): Explicit columns to load from the chunked file (e.g., ['tconst', 'nconst', 'category'] or ['tconst', 'crews', 'category']).
 
     Returns:
         pd.DataFrame or None: Returns the merged DataFrame if save_as='df', otherwise saves to disk and returns None.
@@ -372,36 +408,65 @@ def mergeon_cols(origin_cols_dict,n_rows,file_dict,sep='\t',skip_rows=0,save_as=
     cols=[]
     dfs=[]
     crews=None
-    if n_rows-skip_rows<=500000:
+    if group_file_name.endswith('.tsv'):
+        group_file_name=group_file_name.removesuffix('.tsv')
+    elif group_file_name.endswith('.csv'):
+        group_file_name=group_file_name.removesuffix('.csv')         
+    if n_rows-skip_rows<=1500000:
         for key,values in file_dict.items():
             if key in origin_cols_dict:
-                if group & key ==group_file_name:
+                if group and key==group_file_name :
                     crews=values
                 else:
                     paths.append(values)
                 cols.append(origin_cols_dict[key])
-            for i in range(0,len(paths)):
-                df=pd.read_csv(paths[i],nrows=n_rows,usecols=cols[i],sep=sep,skiprows=range(1,skip_rows+1))
-                dfs.append(df)
-        #else:
-            #for i in range(0,len(paths)):
-                #df=pd.read_csv(paths[i],usecols=cols[i],sep=sep)
-                #dfs.append(df)
+        df_count=0
+        for i in range(0,len(paths)):
+            if sep:
+                df=pd.read_csv(paths[i],nrows=n_rows,usecols=cols[i],sep=sep,skiprows=range(1,skip_rows+1),na_values=r'\N')
+                df_count+=1
+            elif paths[i].endswith('.tsv'):
+                df=pd.read_csv(paths[i],nrows=n_rows,usecols=cols[i],sep='\t',skiprows=range(1,skip_rows+1),na_values=r"\N")
+                df_count+=1
+            elif paths[i].endswith('.csv'):
+                df=pd.read_csv(paths[i],nrows=n_rows,usecols=cols[i],sep=',',skiprows=range(1,skip_rows+1),na_values=r'\N')
+                df_count+=1
+            else:
+                lg.error('Invalid seperator Type!!')
+                return lg.info('Specify seperator type')
+            df.drop_duplicates(subset=['tconst'],keep='first',inplace=True,ignore_index=True)
+            del i
+            dfs.append(df)
+            del df
+            gc.collect()
         if crews:
             df=dfs[0]
             tconst=df['tconst'].to_list()
-            lst=[]
             if use_crew_cols:
                 if group_sep:
-                    chunk=pd.read_csv(crews,usecols=use_crew_cols,sep=group_sep,chunksize=50000)
+                    chunk=pd.read_csv(crews,usecols=use_crew_cols,sep=group_sep,chunksize=50000,na_values=r'\N')
                 else:
-                    chunk=pd.read_csv(crews,usecols=use_crew_cols,sep=sep,chunksize=50000)
+                    if crews.endswith('.tsv'):
+                        chunk=pd.read_csv(crews,usecols=use_crew_cols,sep='\t',chunksize=50000,na_values=r'\N')
+                    elif crews.endswith('.csv'):
+                        chunk=pd.read_csv(crews,usecols=use_crew_cols,sep=',',chunksize=50000,na_values=r'\N')
+                    else:
+                        lg.error('Invalid extension')
+                        return lg.info('Please mention group_sep')
                 mvs=[]
+                count=0
                 for i in chunk:
+                    count+=1
                     filtered=i[(i['tconst'].isin(tconst))&(i['category'].isin(category_group))]
                     if not filtered.empty:
                         grouped_lst=filtered.groupby('tconst')['crews'].apply(lambda x: ','.join(x)).reset_index()
                         mvs.append(grouped_lst)
+                    elif filtered.empty:
+                        break
+                    del i
+                    del filtered
+                    gc.collect()
+                print("Chunks Completed")
                 if mvs:
                     crew_df=pd.concat(mvs)
                     crew_df=crew_df.groupby('tconst')['crews'].apply(lambda x: ','.join(x)).reset_index()
@@ -419,5 +484,37 @@ def mergeon_cols(origin_cols_dict,n_rows,file_dict,sep='\t',skip_rows=0,save_as=
                 df.to_csv('ColumnsMerged.csv',index=False)
                 print('Merged File Saved As: "ColumnsMerged.Csv')
     else:
-        lg.warning("Please keep the range of rows in between 500000")
+        lg.warning("Please keep the range of rows in between 300000")
         lg.info('Toggle "n_rows/skip_rows" to keep rows range in between 500000')    
+
+def chunk_mergeon_cols(origin_cols_dict,file_dict,total_rows=None,index_col_file=None,skip_rows=0,chunk_size=50000,out_path=None,group=False,group_file_name='title.principals(crews)',use_crew_cols=['tconst','crews','category'],category_group=['actor','actress','cinematographer','composer'],group_sep='\t'):
+    first=True
+    if not total_rows:
+        if index_col_file:  
+            if index_col_file.endswith('.tsv'):   
+                total_rows=sum([len(i) for i in pd.read_csv(index_col_file,chunksize=50000,sep='\t')])
+            elif index_col_file.endswith('.csv'):
+                total_rows=sum([len(i) for i in pd.read_csv(index_col_file,chunksize=50000,sep='\t')])
+            else:
+                return lg.error('Invalid sep type in index_col_file')
+        else:
+            return lg.error('Please mention either "total_rows"/"index_col_file"!!')
+    skip=0
+    for i in range(0,total_rows,chunk_size):
+        nrows=min(i+chunk_size,total_rows)
+        if first:
+            if skip_rows:
+                mergeon_cols(origin_cols_dict,file_dict,n_rows=nrows,skip_rows=skip_rows,out_path=out_path,group=group,group_file_name=group_file_name,use_crew_cols=use_crew_cols,category_group=category_group,group_sep=group_sep,save_as='csv')
+            else:
+                mergeon_cols(origin_cols_dict,file_dict,n_rows=nrows,out_path=out_path,group=group,group_file_name=group_file_name,use_crew_cols=use_crew_cols,category_group=category_group,group_sep=group_sep,save_as='csv')
+            skip+=i
+            first=False
+        else:
+            app=mergeon_cols(origin_cols_dict,file_dict,n_rows=nrows,skip_rows=i,group=group,group_file_name=group_file_name,use_crew_cols=use_crew_cols,category_group=category_group,group_sep=group_sep,save_as='df')
+            if app is not None:
+                app.to_csv(out_path,mode='a',index=False,header=False)
+                print('file appended')
+                skip+=i
+            else:
+                print('Data for append not returning as Dataframe')
+                break
