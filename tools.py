@@ -419,21 +419,11 @@ def mergeon_cols(origin_cols_dict,file_dict,n_rows=1000000,sep=None,skip_rows=0,
                     crews=values
                 else:
                     paths.append(values)
-                cols.append(origin_cols_dict[key])
-        df_count=0
+                    cols.append(origin_cols_dict[key])
         for i in range(0,len(paths)):
-            if sep:
-                df=pd.read_csv(paths[i],nrows=n_rows,usecols=cols[i],sep=sep,skiprows=range(1,skip_rows+1),na_values=r'\N')
-                df_count+=1
-            elif paths[i].endswith('.tsv'):
-                df=pd.read_csv(paths[i],nrows=n_rows,usecols=cols[i],sep='\t',skiprows=range(1,skip_rows+1),na_values=r"\N")
-                df_count+=1
-            elif paths[i].endswith('.csv'):
-                df=pd.read_csv(paths[i],nrows=n_rows,usecols=cols[i],sep=',',skiprows=range(1,skip_rows+1),na_values=r'\N')
-                df_count+=1
-            else:
-                lg.error('Invalid seperator Type!!')
-                return lg.info('Specify seperator type')
+            sep=sep if sep else('\t' if paths[i].endswith('.tsv') else ',')
+            true_headers = pd.read_csv(paths[i], sep=sep, nrows=0).columns.tolist()
+            df=pd.read_csv(paths[i],sep=sep,usecols=cols[i],nrows=n_rows,skiprows=skip_rows + 1,na_values=r'\N',names=true_headers)
             df.drop_duplicates(subset=['tconst'],keep='first',inplace=True,ignore_index=True)
             del i
             dfs.append(df)
@@ -444,12 +434,12 @@ def mergeon_cols(origin_cols_dict,file_dict,n_rows=1000000,sep=None,skip_rows=0,
             tconst=df['tconst'].to_list()
             if use_crew_cols:
                 if group_sep:
-                    chunk=pd.read_csv(crews,usecols=use_crew_cols,sep=group_sep,chunksize=50000,na_values=r'\N')
+                    chunk=pd.read_csv(crews,usecols=use_crew_cols,sep=group_sep,chunksize=750000,na_values=r'\N')
                 else:
                     if crews.endswith('.tsv'):
-                        chunk=pd.read_csv(crews,usecols=use_crew_cols,sep='\t',chunksize=50000,na_values=r'\N')
+                        chunk=pd.read_csv(crews,usecols=use_crew_cols,sep='\t',chunksize=750000,na_values=r'\N')
                     elif crews.endswith('.csv'):
-                        chunk=pd.read_csv(crews,usecols=use_crew_cols,sep=',',chunksize=50000,na_values=r'\N')
+                        chunk=pd.read_csv(crews,usecols=use_crew_cols,sep=',',chunksize=750000,na_values=r'\N')
                     else:
                         lg.error('Invalid extension')
                         return lg.info('Please mention group_sep')
@@ -459,20 +449,19 @@ def mergeon_cols(origin_cols_dict,file_dict,n_rows=1000000,sep=None,skip_rows=0,
                     count+=1
                     filtered=i[(i['tconst'].isin(tconst))&(i['category'].isin(category_group))]
                     if not filtered.empty:
-                        grouped_lst=filtered.groupby('tconst')['crews'].apply(lambda x: ','.join(x)).reset_index()
+                        grouped_lst=filtered.groupby('tconst')['crews'].apply(lambda x: ','.join(x.astype(str))).reset_index()
                         mvs.append(grouped_lst)
-                    elif filtered.empty:
-                        break
                     del i
                     del filtered
                     gc.collect()
-                print("Chunks Completed")
                 if mvs:
                     crew_df=pd.concat(mvs)
-                    crew_df=crew_df.groupby('tconst')['crews'].apply(lambda x: ','.join(x)).reset_index()
+                    crew_df=crew_df.groupby('tconst')['crews'].apply(lambda x: ','.join(x.astype(str))).reset_index()
                     dfs.append(crew_df)
         df=dfs[0]
+        df['tconst']=df['tconst'].astype(str)
         for i in range(1,len(dfs)):
+            dfs[i]['tconst']=(dfs[i]['tconst']).astype(str)
             df=pd.merge(df,dfs[i],how='inner',on='tconst',)
         if save_as=='df':
             return df
@@ -483,38 +472,45 @@ def mergeon_cols(origin_cols_dict,file_dict,n_rows=1000000,sep=None,skip_rows=0,
             else:
                 df.to_csv('ColumnsMerged.csv',index=False)
                 print('Merged File Saved As: "ColumnsMerged.Csv')
+                del df
+                gc.collect()
     else:
         lg.warning("Please keep the range of rows in between 300000")
         lg.info('Toggle "n_rows/skip_rows" to keep rows range in between 500000')    
 
-def chunk_mergeon_cols(origin_cols_dict,file_dict,total_rows=None,index_col_file=None,skip_rows=0,chunk_size=50000,out_path=None,group=False,group_file_name='title.principals(crews)',use_crew_cols=['tconst','crews','category'],category_group=['actor','actress','cinematographer','composer'],group_sep='\t'):
-    first=True
+def chunk_mergeon_cols(origin_cols_dict,file_dict,total_rows=None,index_col_file=None,skip_rows=0,chunk_size=50000,out_path=None,group=False,group_file_name='title.principals(crew)',use_crew_cols=['tconst','crews','category'],category_group=['actor','actress','cinematographer','composer'],group_sep='\t',append_only=False):
     if not total_rows:
         if index_col_file:  
             if index_col_file.endswith('.tsv'):   
                 total_rows=sum([len(i) for i in pd.read_csv(index_col_file,chunksize=50000,sep='\t')])
             elif index_col_file.endswith('.csv'):
-                total_rows=sum([len(i) for i in pd.read_csv(index_col_file,chunksize=50000,sep='\t')])
+                total_rows=sum([len(i) for i in pd.read_csv(index_col_file,chunksize=50000,sep=',')])
             else:
                 return lg.error('Invalid sep type in index_col_file')
         else:
             return lg.error('Please mention either "total_rows"/"index_col_file"!!')
-    skip=0
-    for i in range(0,total_rows,chunk_size):
-        nrows=min(i+chunk_size,total_rows)
-        if first:
+    if skip_rows and append_only:
+        start_from=skip_rows
+    else:
+        start_from=0
+    num=0
+    for i in range(start_from,total_rows+chunk_size,chunk_size):
+        if not append_only:
             if skip_rows:
-                mergeon_cols(origin_cols_dict,file_dict,n_rows=nrows,skip_rows=skip_rows,out_path=out_path,group=group,group_file_name=group_file_name,use_crew_cols=use_crew_cols,category_group=category_group,group_sep=group_sep,save_as='csv')
+                mergeon_cols(origin_cols_dict,file_dict,n_rows=chunk_size,skip_rows=skip_rows,out_path=out_path,group=group,group_file_name=group_file_name,use_crew_cols=use_crew_cols,category_group=category_group,group_sep=group_sep,save_as='csv')
             else:
-                mergeon_cols(origin_cols_dict,file_dict,n_rows=nrows,out_path=out_path,group=group,group_file_name=group_file_name,use_crew_cols=use_crew_cols,category_group=category_group,group_sep=group_sep,save_as='csv')
-            skip+=i
-            first=False
+                mergeon_cols(origin_cols_dict,file_dict,n_rows=chunk_size,out_path=out_path,group=group,group_file_name=group_file_name,use_crew_cols=use_crew_cols,category_group=category_group,group_sep=group_sep,save_as='csv')
+            append_only=True
         else:
-            app=mergeon_cols(origin_cols_dict,file_dict,n_rows=nrows,skip_rows=i,group=group,group_file_name=group_file_name,use_crew_cols=use_crew_cols,category_group=category_group,group_sep=group_sep,save_as='df')
+            app=mergeon_cols(origin_cols_dict,file_dict,n_rows=chunk_size,skip_rows=i,group=group,group_file_name=group_file_name,use_crew_cols=use_crew_cols,category_group=category_group,group_sep=group_sep,save_as='df')
             if app is not None:
                 app.to_csv(out_path,mode='a',index=False,header=False)
-                print('file appended')
-                skip+=i
+                num+=1
+                print(f"Chunk Appended: chunk{num}")
+                del app
+                gc.collect()
             else:
                 print('Data for append not returning as Dataframe')
                 break
+    print('Merged Datas!!!!')
+    print('Total Rows: ',total_rows)
